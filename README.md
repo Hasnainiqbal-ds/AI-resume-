@@ -43,8 +43,10 @@ Get a free key at <https://aistudio.google.com/apikey>, then use **one** of thes
    ```
 3. Set an environment variable: `GEMINI_API_KEY=your-key-here`
 
-The default model is `gemini-flash-latest`. If you see a "model not found" error, change the model
-name in the sidebar (for example `gemini-2.5-flash`).
+The default model is `gemini-3.5-flash`. If it fails, the app automatically tries `gemini-3.5-flash-lite`,
+`gemini-3.8-flash`, `gemini-flash-latest` and `gemini-2.5-flash`. Google renames and retires models often, so if
+you see a "model not found" error, copy a current Flash model name from
+<https://ai.google.dev/gemini-api/docs/models> into the **Gemini model** box in the sidebar.
 
 ## Deploy on Streamlit Community Cloud
 1. Push this repo to GitHub.
@@ -68,9 +70,10 @@ If you use a virtual environment, activate it first.
 - **Streamlit Cloud:** `requirements.txt` must be in the repo root next to `app.py`. Then use
   **Manage app -> Reboot app**.
 - **"Gemini is temporarily unavailable" / 503 overloaded:** this is a busy-server problem on Google's
-  side. The app already retries 3 times per model and then tries `gemini-2.5-flash` and
-  `gemini-2.5-flash-lite`. If it still fails, wait 1-2 minutes and click Analyse again.
-- **"Model not found":** change the model name in the sidebar (for example `gemini-2.5-flash`).
+  side. The app already retries 3 times per model and then tries other Flash models. If it still fails, wait 1-2 minutes and click Analyse again.
+- **"404 NOT_FOUND ... no longer available to new users":** that model was retired for new accounts
+  (this happened to the `gemini-2.5-*` models). Use a 3.x model such as `gemini-3.5-flash` or
+  `gemini-3.5-flash-lite`.
 - **"API key rejected":** create a new key at <https://aistudio.google.com/apikey>.
 
 ## Privacy
