@@ -25,8 +25,14 @@ import streamlit as st
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-DEFAULT_MODEL = "gemini-flash-latest"          # alias that always points to the newest Flash
-FALLBACK_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+DEFAULT_MODEL = "gemini-3.5-flash"             # stable (GA) Flash model
+FALLBACK_MODELS = [                             # tried in this order if the chosen model fails
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",                         # legacy: only works for older accounts
+]
 RETRIES_PER_MODEL = 3                          # tries per model when Google is overloaded
 RETRY_WAIT_SECONDS = (2, 5)                    # wait before retry 2 and retry 3
 MAX_RESUME_CHARS = 15_000                      # keeps the prompt small and cheap
@@ -340,44 +346,59 @@ def _is_transient(msg: str) -> bool:
         "internal", "deadline", "timeout", "timed out", "connection", "temporarily"))
 
 
+def _is_not_found(msg: str) -> bool:
+    return any(t in msg for t in ("not found", "404", "not_found", "no longer available", "is not supported"))
+
+
 def call_gemini(api_key: str, model: str, prompt: str) -> str:
     """
     Call Gemini and return raw text.
     - Temporary errors (503 overloaded, timeouts): retry the same model a few times with a short wait.
-    - Still failing, quota hit (429) or model not found (404): switch to the next fallback model.
+    - Still failing, quota hit (429) or model not available (404): switch to the next fallback model.
     - Anything else (bad API key etc.): raise immediately.
     """
     genai = import_or_install("google.genai", "google-genai")
     types = import_or_install("google.genai.types", "google-genai")
 
     client = genai.Client(api_key=api_key)
+    # No temperature set on purpose: Google recommends the default for Gemini 3 models.
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
         response_mime_type="application/json",
-        temperature=0.2,
     )
 
     candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
-    last_error: Optional[Exception] = None
+    failures: List[Tuple[str, str, bool]] = []          # (model, error text, was_not_found)
     for candidate in candidates:
         for attempt in range(RETRIES_PER_MODEL):
             try:
                 response = client.models.generate_content(model=candidate, contents=prompt, config=config)
                 return response.text or ""
             except Exception as exc:  # noqa: BLE001 - classified below
-                last_error = exc
                 msg = str(exc).lower()
-                if "not found" in msg or "404" in msg or "not_found" in msg:
-                    break                       # wrong model name -> next model
+                if _is_not_found(msg):
+                    failures.append((candidate, str(exc), True))
+                    break                       # model not available -> next model
                 if "429" in msg or "quota" in msg or "resource_exhausted" in msg:
+                    failures.append((candidate, str(exc), False))
                     break                       # quota is per model -> next model
                 if _is_transient(msg):
                     if attempt < RETRIES_PER_MODEL - 1:
                         time.sleep(RETRY_WAIT_SECONDS[min(attempt, len(RETRY_WAIT_SECONDS) - 1)])
                         continue                # retry the same model
+                    failures.append((candidate, str(exc), False))
                     break                       # retries used up -> next model
                 raise                           # auth error or something unexpected
-    raise last_error if last_error else RuntimeError("Gemini call failed.")
+
+    if failures and all(f[2] for f in failures):
+        raise ValueError(
+            "None of the Gemini models are available for your API key (" +
+            ", ".join(f[0] for f in failures) + "). Google changes model names often. Open "
+            "https://ai.google.dev/gemini-api/docs/models, copy a current Flash model name "
+            "and paste it into the 'Gemini model' box in the sidebar."
+        )
+    summary = " | ".join(f"{m}: {e[:90]}" for m, e, _ in failures[-3:])
+    raise RuntimeError(f"All Gemini models failed. {summary}")
 
 
 def friendly_error(exc: Exception) -> str:
@@ -516,7 +537,7 @@ def main() -> None:
         )
         api_key = typed_key.strip() or secret_key
         model = st.text_input("Gemini model", value=DEFAULT_MODEL,
-                              help="If you get a 'model not found' error, try gemini-2.5-flash.").strip() or DEFAULT_MODEL
+                              help="If you get a 'model not found' error, copy a current Flash model name from ai.google.dev/gemini-api/docs/models.").strip() or DEFAULT_MODEL
         st.divider()
         st.caption(
             "ℹ️ The score is an **estimate**. Real ATS products (Workday, Greenhouse, Taleo...) don't "
