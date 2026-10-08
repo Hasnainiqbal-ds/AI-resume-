@@ -67,6 +67,9 @@ If you use a virtual environment, activate it first.
 - Install **`python-docx`**, not `docx`.
 - **Streamlit Cloud:** `requirements.txt` must be in the repo root next to `app.py`. Then use
   **Manage app -> Reboot app**.
+- **"Gemini is temporarily unavailable" / 503 overloaded:** this is a busy-server problem on Google's
+  side. The app already retries 3 times per model and then tries `gemini-2.5-flash` and
+  `gemini-2.5-flash-lite`. If it still fails, wait 1-2 minutes and click Analyse again.
 - **"Model not found":** change the model name in the sidebar (for example `gemini-2.5-flash`).
 - **"API key rejected":** create a new key at <https://aistudio.google.com/apikey>.
 
