@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
@@ -25,7 +26,9 @@ import streamlit as st
 # Configuration
 # --------------------------------------------------------------------------- #
 DEFAULT_MODEL = "gemini-flash-latest"          # alias that always points to the newest Flash
-FALLBACK_MODELS = ["gemini-flash-latest", "gemini-2.5-flash"]
+FALLBACK_MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+RETRIES_PER_MODEL = 3                          # tries per model when Google is overloaded
+RETRY_WAIT_SECONDS = (2, 5)                    # wait before retry 2 and retry 3
 MAX_RESUME_CHARS = 15_000                      # keeps the prompt small and cheap
 MAX_JD_CHARS = 6_000
 MAX_FILE_MB = 5
@@ -330,8 +333,20 @@ def compute_overall_score(category_scores: Dict[str, int], checklist_score: int)
     return _clamp(AI_SHARE * ai_score + CHECKLIST_SHARE * checklist_score)
 
 
+def _is_transient(msg: str) -> bool:
+    """Temporary server-side problems that are worth retrying."""
+    return any(t in msg for t in (
+        "503", "500", "502", "504", "unavailable", "overloaded", "high demand",
+        "internal", "deadline", "timeout", "timed out", "connection", "temporarily"))
+
+
 def call_gemini(api_key: str, model: str, prompt: str) -> str:
-    """Call Gemini and return raw text. Tries fallback models if the model name is not found."""
+    """
+    Call Gemini and return raw text.
+    - Temporary errors (503 overloaded, timeouts): retry the same model a few times with a short wait.
+    - Still failing, quota hit (429) or model not found (404): switch to the next fallback model.
+    - Anything else (bad API key etc.): raise immediately.
+    """
     genai = import_or_install("google.genai", "google-genai")
     types = import_or_install("google.genai.types", "google-genai")
 
@@ -345,16 +360,24 @@ def call_gemini(api_key: str, model: str, prompt: str) -> str:
     candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
     last_error: Optional[Exception] = None
     for candidate in candidates:
-        try:
-            response = client.models.generate_content(model=candidate, contents=prompt, config=config)
-            return response.text or ""
-        except Exception as exc:  # noqa: BLE001 - we re-raise a friendly error below
-            last_error = exc
-            msg = str(exc).lower()
-            if "not found" in msg or "404" in msg or "not_found" in msg:
-                continue          # try the next model name
-            raise
-    raise RuntimeError(f"None of the models were found ({', '.join(candidates)}): {last_error}")
+        for attempt in range(RETRIES_PER_MODEL):
+            try:
+                response = client.models.generate_content(model=candidate, contents=prompt, config=config)
+                return response.text or ""
+            except Exception as exc:  # noqa: BLE001 - classified below
+                last_error = exc
+                msg = str(exc).lower()
+                if "not found" in msg or "404" in msg or "not_found" in msg:
+                    break                       # wrong model name -> next model
+                if "429" in msg or "quota" in msg or "resource_exhausted" in msg:
+                    break                       # quota is per model -> next model
+                if _is_transient(msg):
+                    if attempt < RETRIES_PER_MODEL - 1:
+                        time.sleep(RETRY_WAIT_SECONDS[min(attempt, len(RETRY_WAIT_SECONDS) - 1)])
+                        continue                # retry the same model
+                    break                       # retries used up -> next model
+                raise                           # auth error or something unexpected
+    raise last_error if last_error else RuntimeError("Gemini call failed.")
 
 
 def friendly_error(exc: Exception) -> str:
@@ -364,8 +387,10 @@ def friendly_error(exc: Exception) -> str:
         return "Your Gemini API key was rejected. Check that it is correct and has the Gemini API enabled."
     if "429" in low or "quota" in low or "resource_exhausted" in low or "rate limit" in low:
         return "Gemini rate limit or quota reached. Wait a minute and try again."
-    if "timeout" in low or "timed out" in low or "unavailable" in low or "503" in low:
-        return "Gemini is temporarily unavailable. Please try again shortly."
+    if _is_transient(low):
+        return ("Google's Gemini servers are overloaded or unreachable right now, even after retrying "
+                "several models. Wait 1-2 minutes and click Analyse again. "
+                f"(Technical detail: {msg[:150]})")
     return msg[:300]
 
 
